@@ -1,0 +1,1165 @@
+---
+title: "Zonings and Rezonings"
+author: "Jennah Gosciak"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+knit: (function(inputFile, encoding) { 
+  rmarkdown::render(inputFile,
+  encoding=encoding,
+  output_file="01_analysis.html")})
+output:
+  html_document:
+    toc: true
+    theme: paper
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F,
+                      fig.width = 6, fig.height = 10)
+```
+
+```{r, load packages}
+# load packages
+library(tidyverse)
+library(magrittr)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(dbplyr)
+library(DBI)
+library(RPostgres)
+library(assertr)
+library(RColorBrewer)
+library(sf)
+library(fs)
+library(purrr)
+library(paletteer)
+library(mapview)
+library(leaflet)
+library(sf)
+library(gt)
+library(ggspatial)
+
+root <- "C:/Users/jg6849/Documents/Github/SpatialAnalysis_Visualization/rproj_1/proj1"
+inp <- path(root, "1_input")
+out <- path(root, "2_output")
+figs <- path(out, "figs")
+
+source("99_common.R")
+```
+# Data source
+Data is MapPLUTO, which is available from [NYC Open Data](https://data.cityofnewyork.us/City-Government/Primary-Land-Use-Tax-Lot-Output-Map-MapPLUTO-/f888-ni5f) and provided as spatial data from the [New York City Department of City Planning](https://www1.nyc.gov/assets/planning/download/zip/data-maps/open-data).
+
+Other data sources include:
+
+* Borough shapefiles from [DCP](https://www1.nyc.gov/site/planning/data-maps/open-data.page)
+
+* NTA shapefiles from [DCP](https://www1.nyc.gov/site/planning/data-maps/open-data.page)
+
+* Zoning amendments since 1977 from [DCP](https://www1.nyc.gov/site/planning/data-maps/open-data.page)
+
+# Technical methodology
+* See [Medium](https://medium.com/@jg6849/contextual-changes-in-nyc-rezonings-5eb6f3a126c7) for a less technical explanation.
+
+## Merging 2020 and 2010 PLUTO data
+The purpose of this article is to examine descriptively changes in building classes between 2010 and 2020. This is a point in time comparison: all the data collected as of version 8 of MapPLUTO 2020 and version 1 of MapPLUTO 2010. I was able to link the two files together by performing a point-to-polygon spatial join between 2020 MapPLUTO data and 2010 MapPLUTO data. A simple join on BBL would not be accurate in this case because BBLs change overtime and there is no comprehensive BBL crosswalk that allows you to link records.
+
+In joining the two files, I used the "within" join constraint as opposed to "intersects"--since the number of unmerged records is the same in either case and I wanted to reduce the possibility of duplicate records as a result of the spatial join. After performing the spatial join, there were two records that were duplicated in the 2020 data. For this analysis, I dropped one record of each duplicate pair after checking that they were cases of lots overlaid on top of each other. I also identified many duplicate BBL values in the 2010 data. However, I imagine this scenario is much more likely as BBLs can be subdivided. I keep duplicate BBL values from 2010, but only count the number of units once in the relevant analyses.
+
+There are several shortcomings with the above approach:
+
+* it is difficult to tell whether I am capturing information from an historical adjacent lot. I used the "within" join option to be more conservative in this respect. Future quality control checks should confirm that these are actually different or subdivided lots.
+
+* using the centroid of the geometry may not be accurate in unevenly shaped geometries. In 217 cases, centroids do fall outside of the lot geometries. I did not spend too much time looking into a method for addressing this issue. 217 cases represents <1% of all records in PLUTO. I did look into the possibility of using point data (latitude and longitude values) that are already in the dataset. The point data produced results that were less accurate then the method that used centroids, so I proceeded with using centroids.
+
+* there are some cases of historical records that did not merge in the spatial join process and are missing in the dataset. I dropped these records as I am most interested in the change in existing city lots __compared__ to what might have been there prior.
+
+## Rezoning analysis
+As context for my analysis of building class changes, I examined changes in rezonings over time and between 2010 and 2020. I used the zoning amendments geojson file provided by DCP and I restricted the dataset to different samples: (1) all rezonings, (2) all adopted rezonings, and (3) all adopted rezonings between 2010 and 2020.I also performed a spatial join with NTA and borough geographies in order to calculate the number of rezonings that occurred in both geographies. Lastly, I calculated the area percentage of rezonings--comparing the area of a rezoning to the area of the NTA or borough. In order to do this, I ensured that the data was in the NAD83/New York Long Island projected coordinate system and converted square feet to square miles.
+
+## Building class comparisons
+To compare building class differences, I first linked the building class codes to descriptions using html data provided by the [New York City Department of Finance](https://www1.nyc.gov/assets/finance/jump/hlpbldgcode.html). Based on these descriptions, I also developed a coarser set of [categories](https://docs.google.com/spreadsheets/d/1itrrQWQk8rBO2HqioXhxcouCUWeVGq-lYuQsPXRyqxI/edit?usp=sharing) that are less detailed and offer more meaning to the average individual. With these categories and the original building class descriptions, I produced a string variable that concatenated both original variables from 2020 and 2010. I produced frequency and percentages of the most common combinations.
+
+## Land use comparisons
+The coarsened categories that I created (above) are very similar to the official land use categories that DCP provides. Ultimately, I decided to focus on the official land use categories, instead of building class codes, as differences between 2010 and 2020 were more apparent. Similar to the methods I used for comparing building class codes, I linked the land use codes to their descriptions. Since there are only 11 land use codes, I defined lists for both codes and descriptions (rather than using an external file). The codes can be found in the [PLUTO data dictionary file](https://www1.nyc.gov/assets/planning/download/pdf/data-maps/open-data/pluto_datadictionary.pdf?v=21v3). I produced frequencies and counts of all combinations of land use changes between 2010 and 2020.
+
+## Indicators of change
+Lastly, I created four indicators for different outcomes that I wanted to observe: growth in residential development, loss of residential development, growth of vacant land, and loss of public/outdoor space. After creating these indicators, I calculated percentages by neighborhood and displayed the percentages in four separate maps to observe any spatial trends across the city.
+
+# Code
+## Load PLUTO data
+Load data for 2020 and 2010 (PLUTO).
+
+* Loading data was done using tempfiles in R and unzipping the files that are stored on DCP's open data website.
+
+```{r, load spatial data}
+## load shapefiles of pluto data
+
+# # Shapefile 1: load MapPLUTO 2020
+temp <- tempfile()
+temp2 <- tempfile()
+download.file("https://www1.nyc.gov/assets/planning/download/zip/data-maps/open-data/nyc_mappluto_20v8_arc_shp.zip", temp)
+unzip(zipfile = temp, exdir = temp2)
+pluto_20shp <- read_sf(path(temp2, "MapPLUTO.shp")) %>%
+  rename_all(~ str_to_lower(.)) %>%
+  st_transform(2263)
+unlink(c(temp, temp2))
+#
+temp <- tempfile()
+temp2 <- tempfile()
+download.file("https://www1.nyc.gov/assets/planning/download/zip/data-maps/open-data/mappluto_10v1.zip", temp)
+unzip(zipfile = temp, exdir = temp2)
+
+# Shapefile 2: load MapPLUTO 2010
+# the 2010 data is stored in separate files, so need to read in each file and then combine them
+pluto_10shp <- map2_dfr(
+  c(
+    "Manhattan", "Brooklyn", "Queens", "Bronx",
+    "Staten_Island"
+  ),
+  c("MN", "BK", "QN", "BX", "SI"),
+  ~ read_sf(path(temp2, "MapPLUTO_10v1", .x, str_c(.y, "MapPLUTO.shp")))
+) %>%
+  rename_all(~ str_to_lower(.)) %>%
+  st_transform(2263)
+unlink(c(temp, temp2))
+
+# join 2010 and 2020 pluto datasets
+pluto_join <- pluto_20shp %>%
+  st_centroid() %>%
+  # need to transform to NAD83 state plane New York City/Long Island
+  st_transform(2263) %>%
+  st_join(pluto_10shp, join = st_within, suffix = c("_20", "_10")) %>%
+  mutate(join_result = case_when(
+    is.na(bbl_10) ~ "Did not join",
+    TRUE ~ "Joined"
+  )) %>%
+  # reduce the number of variables used since these files are large!
+  select(
+    starts_with("bbl_"), starts_with("unitsres"),
+    starts_with("bldgclass"),
+    starts_with("borough"), starts_with("landuse")
+  ) %>%
+  # need to drop two buildings because of duplicates
+  # owned by Con Ed
+  # other building creates duplicates in 2020
+  filter(
+    bbl_10 != "2027810800",
+    !(bbl_10 == "4008500050" & bbl_20 == "1018190100")
+  )
+
+# check uniqueness after performing spatial join
+pluto_join %>%
+  as.data.frame() %>%
+  eeptools::isid("bbl_20") %>%
+  stopifnot()
+
+# check number missing bbl_10
+pluto_join %>%
+  as.data.frame() %>%
+  filter(is.na(bbl_10)) %>% 
+  nrow()
+
+# drop them, small number in comparison to rest of the data
+pluto_join <- pluto_join %>%
+  filter(!is.na(bbl_10))
+
+# bbl 10 duplicates
+# make sure to drop them when comparing 2010 and 2020
+# otherwise there will be duplicates
+pluto_join %>%
+  as.data.frame() %>%
+  filter(!is.na(bbl_10)) %>%
+  group_by(bbl_10) %>%
+  filter(n() > 1)
+```
+
+Check that merging via lat, lon in the data doesn't produce better join results
+```{r, check pt data}
+# use point version for comparing old and new data
+pluto_20pts <- pluto_20shp %>% 
+  # better to use centroids
+  # fewer cases aren't merging (only 217)
+  st_centroid() %>% 
+  st_transform(2263)
+
+pluto_20pts_alt <- pluto_20shp %>% 
+  # comparison with lat and lon from data
+  as.data.frame() %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(2263)
+
+# check the sum of cases that aren't intersecting
+pluto_check <- pluto_20pts %>% 
+  st_within(pluto_20shp)
+sum(lengths(pluto_check) == 0)
+
+# percentage of all points
+sum(lengths(pluto_check) == 0)/nrow(pluto_20pts)
+
+# check the sum of cases that aren't merging with second method
+pluto_check_alt <- pluto_20pts_alt %>% 
+  st_within(pluto_20shp)
+sum(lengths(pluto_check_alt) == 0)
+
+# percentage of all points
+sum(lengths(pluto_check_alt) == 0)/nrow(pluto_20pts)
+```
+
+## Background analysis on rezoning
+
+Load geographic shapefiles
+
+* Neighborhood (using NTAs)
+
+* Zoning amendments, from NYC DCP
+
+* Borough shapefiles, from NYC DCP
+
+```{r, load rezoning areas}
+url_zoning <- "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/services/nyzma/FeatureServer/0/query?where=1=1&outFields=*&outSR=4326&f=pgeojson"
+url_boro <- "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/services/NYC_Borough_Boundary/FeatureServer/0/query?where=1=1&outFields=*&outSR=4326&f=pgeojson"
+url_nhood <- "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/services/NYC_Neighborhood_Tabulation_Areas_2020/FeatureServer/0/query?where=1=1&outFields=*&outSR=4326&f=pgeojson"
+
+# (1) zoning amendments data
+rz <- st_read(url_zoning)
+rz <- rz %>%
+  # convert from epoch time
+  mutate(
+    EFFECTIVE_DATE = as.POSIXct(EFFECTIVE / 1000, origin = "1970-01-01"),
+    EFFECTIVE_YEAR = lubridate::year(EFFECTIVE_DATE),
+    # extract numbers that are followed by a bracket
+    EFFECTIVE_CAT = str_extract(cut(EFFECTIVE_YEAR, breaks = 7), "[0-9]+(?=])") %>%
+      if_else(is.na(.), "No year provided", .),
+    EFFECTIVE_CAT = str_c(as.numeric(EFFECTIVE_CAT) - 6, "-", EFFECTIVE_CAT),
+    EFFECTIVE_CAT2 = str_extract(cut(EFFECTIVE_YEAR, seq(1976, 2020, 2)), "[0-9]+(?=])") %>%
+      if_else(is.na(.), "No year provided", .),
+    EFFECTIVE_CAT2 = str_c(as.numeric(EFFECTIVE_CAT2) - 1, "-", EFFECTIVE_CAT2)
+  ) %>%
+  # need to convert to NAD83 State Plane New York / Long Island
+  st_transform(2263)
+
+# zoning amendments file, restricted to 2010 - 2020
+# only adopted rezonings
+rz_2010_2020 <- rz %>%
+  filter(
+    EFFECTIVE_YEAR %in% c(2010:2020),
+    !is.na(EFFECTIVE_YEAR),
+    STATUS == "Adopted"
+  )
+
+rz_adpt <- rz %>%
+  # filter just for adopted rezonings, but at any time
+  filter(STATUS == "Adopted")
+
+# (2) shapefile for NYC boroughs
+boro <- st_read(url_boro) %>%
+  st_transform(2263)
+
+# (3) shapefile for NYC neighborhoods (these are actually
+# Neighborhood Tabulation Areas or NTAs)
+nhood <- st_read(url_nhood) %>%
+  st_transform(2263)
+```
+```{r}
+# produce pluto file restricted to rezoned areas between 2010 and 2020
+# performing an intersection
+# note: pluto_join is point data, so a spatial join works in this case!
+pluto_rz_int <- pluto_join %>% 
+  st_intersects(rz_2010_2020)
+pluto_rz <- pluto_join[lengths(pluto_rz_int) > 0, ]
+pluto_rz %>%
+  as.data.frame() %>% 
+  head()
+
+pluto_rz %>% 
+  saveRDS(path(out, "pluto_rz.RDS"))
+
+Graph of all rezonings in the zoning amendment data
+```{r, plot rezoning areas, fig.height = 6, fig.width = 10}
+ggplot() +
+  geom_sf(data = boro, fill = "lightgray", color = NA, alpha = 0.3) +
+  geom_sf(data = nhood, color = "darkgray", alpha = 0.3, fill = NA, size = 0.1) +
+  geom_sf(data = rz_adpt, fill = paletteer_d("rcartocolor::Earth", 6)[[6]],
+          color = NA) +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank()) +
+  labs(caption = "Data source: New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true") 
+  
+ggsave(path(figs, "1_rezone_map.pdf"))
+```
+
+Background statistics on rezoned area
+
+* Percent of total area citywide and by borough
+
+* Number of rezonings by NTA
+
+```{r, area ratios}
+## Square miles of rezoning
+# all 
+rz_adpt %>% 
+  st_area(geometry) %>% 
+  sum() %>% 
+  as.numeric() %>% 
+  `/`(5280^2)
+
+# since 2000, with a nonmissing date
+rz_adpt %>% 
+  filter(EFFECTIVE_YEAR >= 2000 & !is.na(EFFECTIVE_YEAR)) %>% 
+  st_area(geometry) %>% 
+  sum() %>% 
+  as.numeric() %>% 
+  `/`(5280^2)
+
+# missing date
+rz_adpt %>% 
+  filter(is.na(EFFECTIVE_YEAR)) %>% 
+  st_area(geometry) %>% 
+  sum() %>% 
+  as.numeric() %>% 
+  `/`(5280^2)
+
+# share of total nyc area
+rz_area <- rz_adpt %>% 
+  st_transform(2263) %>% 
+  st_area(geometry) %>% 
+  sum() %>% 
+  as.numeric()
+
+# sum of rezoned areas, adopted, between 2010 and 2020
+rz_area_2010 <- rz_adpt %>% 
+  filter(EFFECTIVE_YEAR %in% c(2010:2020)) %>% 
+  st_area(geometry) %>% 
+  sum() %>% 
+  as.numeric()
+
+# rezoned areas missing effective_year
+rz_area_na <- rz_adpt %>% 
+  filter(is.na(EFFECTIVE_YEAR)) %>% 
+  st_area(geometry) %>% 
+  sum() %>% 
+  as.numeric()
+
+# sum of borough area
+boro_area <- boro %>% 
+  st_area(geometry) %>% 
+  sum() %>% 
+  as.numeric()
+
+# create summary table
+rz_stats <- tibble(area_per = c((rz_area * 100 / boro_area),
+                     (rz_area_2010 * 100 / boro_area)),
+       file = c("All years",
+                "2010-2020"),
+       BoroName = rep("Citywide", 2))
+rz_stats
+```
+
+Share/percentage of rezoning area compared to borough area
+```{r}
+# check uniqueness, not unique
+stopifnot(eeptools::isid(as.data.frame(rz_adpt), c(
+  "ULURPNO",
+  "PROJECT_NAME"
+)) == F)
+# need to create uniqueid for merging
+rz_adpt <- rz_adpt %>%
+  mutate(uniqueid = row_number())
+
+rz_boro <- rz_adpt %>%
+  st_centroid() %>%
+  # spatial join to get borough information
+  st_join(st_buffer(boro, 30), join = st_intersects) %>%
+  as.data.frame() %>%
+  select(c("uniqueid", "BoroName")) %>%
+  left_join(rz_adpt, ., by = "uniqueid") %>%
+  ## fill in missing boro names
+  mutate(BoroName = case_when(
+    PROJECT_NAME == "BAY ST LANDING" ~ "Staten Island",
+    PROJECT_NAME == "SKYLINE II REZONING" ~ "Queens",
+    PROJECT_NAME == "STUYVESANT COVE PARK" ~ "Manhattan",
+    PROJECT_NAME == "NEW STAPLETON WATERFRONT DEV" ~ "Staten Island",
+    PROJECT_NAME == "125 EDGEWATER STREET" ~ "Staten Island",
+    ULURPNO == "180127zmm" | ULURPNO == "180150zmm" ~ "Manhattan",
+    TRUE ~ BoroName
+  ))
+
+# check uniqueness
+stopifnot(eeptools::isid(as.data.frame(rz_boro), c("uniqueid")))
+
+# there should be no more missing values
+rz_boro %>%
+  filter(is.na(BoroName)) %>%
+  nrow() %>%
+  equals(0) %>%
+  stopifnot()
+```
+
+Identify percent rezoned areas of total borough areas
+
+* Add citywide stats
+
+```{r}
+stopifnot(nrow(rz_adpt) == nrow(rz_boro))
+nrow(rz_boro)
+rz_boro_graph_df <- rz_boro %>% 
+  mutate(file = "All years") %>% 
+  bind_rows(filter(rz_boro, EFFECTIVE_YEAR %in% c(2010:2020)) %>% 
+              mutate(file = "2010-2020")) %>% 
+  mutate(rz_area_sqmi = as.numeric(st_area(geometry)) / (5280^2)) %>% 
+  as.data.frame() %>% 
+  group_by(file, BoroName) %>% 
+  summarize(across(rz_area_sqmi, sum, na.rm = T)) %>% 
+  full_join(boro, ., by = "BoroName") %>% 
+  mutate(boro_area_sqmi = as.numeric(st_area(geometry)) / (5280^2)) %>% 
+  as.data.frame() %>% 
+  mutate(area_per = rz_area_sqmi * 100 / boro_area_sqmi) %>% 
+  select(c("BoroName", "area_per", "file")) %>% 
+  bind_rows(rz_stats) %>% 
+  mutate(BoroName = factor(BoroName, levels = c("Manhattan", "Bronx",
+                  "Brooklyn", "Queens", "Staten Island", "Citywide"),
+         ordered = T)) %>% 
+  mutate(file = factor(file, levels = c("All years", "2010-2020"), ordered = T))
+rz_boro_graph_df
+```
+
+Produce formatted graph, includes citywide and borough-specific information
+```{r, fig.width = 6, fig.height = 6}
+rz_boro_graph_df  %>% 
+  ggplot(aes(BoroName, area_per, fill = file)) +
+  geom_col(position = position_dodge(0.9),
+           width = 0.8) +
+  geom_text(aes(label = paste0(round(area_per,1),"%"), group = file),
+            position = position_dodge(0.9), vjust = -1) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  scale_fill_paletteer_d("rcartocolor::Earth", name = "") +
+  theme_classic() +
+  labs(x = "Borough",
+       y = "Percent of borough area",
+       caption = "Data source: New York City Department of City Planning")
+
+ggsave(path(figs, "3_rezoning_stats.pdf"))
+ggsave(path(figs, "3_rezoning_stats.png"))
+```
+
+Produce formatted graph of just citywide stats
+```{r}
+rz_stats %>% 
+  ggplot(aes(reorder(file, -area_per),
+               area_per)) +
+  geom_col(fill = paletteer_d("rcartocolor::Earth", 2)[[2]]) +
+  geom_text(aes(label = round(area_per)), vjust = -1) +
+  theme_classic() +
+  labs(x = "", y = "Percent of NYC area") +
+  scale_y_continuous(limits = c(0, 60)) +
+  labs(caption = "Data source: New York City Department of City Planning")
+
+ggsave(path(figs, "0_rz_stats.pdf"), width = 5, height = 6)
+ggsave(path(figs, "0_rz_stats.png"), width = 5, height = 6)
+```
+
+Plot adopted rezoning areas by year
+```{r, plot rezoning areas yr, fig.height = 6, fig.width = 10}
+ggplot() +
+  geom_sf(data = boro, fill = "lightgray", color = NA, alpha = 0.3) +
+  geom_sf(data = nhood, color = "darkgray", alpha = 0.3, fill = NA, size = 0.1) +
+  geom_sf(data = rz_adpt, aes(fill = EFFECTIVE_CAT),
+          color = NA) +
+  scale_fill_manual(values = c(paletteer_d("rcartocolor::Earth", 7), "dark gray"),
+                    name = "Year adopted") +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank()) +
+  labs(title = "Adopted rezonings by year adopted",
+       caption = "New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true")
+
+ggsave(path(figs, "2_rezoning_by_year.pdf"))
+ggsave(path(figs, "2_rezoning_by_year.png"))
+```
+
+Checking rezoning geographies
+```{r, fig.width = 10, fig..height = 10}
+# FOR CHECKING geographies and labeling maps
+filter(rz_adpt, EFFECTIVE_YEAR %in% c(2010:2020)) %>% 
+  mutate(area = as.numeric(st_area(geometry))) %>% 
+  arrange(-area) %>% 
+  as.data.frame() %>% 
+  head()
+
+filter(rz_adpt, EFFECTIVE_YEAR %in% c(2010:2020)) %>% 
+  mutate(area = as.numeric(st_area(geometry))) %>% 
+  arrange(-area) %>% 
+  head(5) %>% 
+  ggplot() +
+  geom_sf(aes(fill = area)) +
+  geom_sf_label(aes(label = PROJECT_NAME)) +
+  theme_classic()  +
+  labs(caption = "Data source: New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true")
+
+filter(rz_adpt, EFFECTIVE_YEAR %in% c(2010:2020)) %>%
+  mutate(area = as.numeric(st_area(geometry))) %>% 
+  filter(str_detect(PROJECT_NAME, "OZONE")) %>% 
+  ggplot() +
+  geom_sf(aes(fill = EFFECTIVE_YEAR)) +
+  geom_sf_label(aes(label = if_else(area > 20000000, PROJECT_NAME, NA_character_)), size = 2) +
+  theme_classic()  +
+  labs(caption = "Data source: New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true")
+
+```
+
+Plot adopted rezonings, just 2010-2020
+```{r, fig.height = 6, fig.width = 10}
+ggplot() +
+  geom_sf(data = boro, fill = "lightgray", color = NA, alpha = 0.3) +
+  geom_sf(data = nhood, color = "darkgray", alpha = 0.3, fill = NA, size = 0.1) +
+  geom_sf(data = filter(rz_adpt, EFFECTIVE_YEAR %in% c(2010:2020)),
+          aes(fill = EFFECTIVE_CAT2),
+          color = NA) +
+  scale_fill_manual(values = c(paletteer_d("rcartocolor::Earth", 7), "dark gray"),
+                    name = "Year adopted") +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank()) +
+  labs(title = "Adopted rezonings by year adopted",
+       caption = "Data source: New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true")
+
+ggsave(path(figs, "2_rezoning_by_year_2010_2020.pdf"))
+ggsave(path(figs, "2_rezoning_by_year_2010_2020.png"))
+```
+
+Plot rezonings by neighborhood: number
+```{r, fig.width = 10}
+rz_nta_graph_df <- rz_adpt %>% 
+  filter(EFFECTIVE_YEAR %in% c(2010:2020)) %>%
+  mutate(geometry = st_centroid(geometry),
+         uniqueid = row_number()) %>% 
+  st_join(nhood, by = "intersects") %>% 
+  as.data.frame() %>% 
+  verify_isid("uniqueid") %>% 
+  group_by(BoroName, NTAName) %>% 
+  summarize(n_rz = n()) %>%
+  arrange(-n_rz) %>% 
+  mutate(Boro_NTA = str_wrap(NTAName, 10))
+
+rz_nta_graph_df %>% 
+  head(10) %>% 
+  ggplot(aes(reorder(Boro_NTA, -n_rz), n_rz)) +
+  geom_col(fill = paletteer_d("rcartocolor::Earth", 2)[[2]]) +
+  geom_text(aes(label = n_rz), vjust = -1) +
+  theme_classic() +
+  labs(x = "Neighborhood",
+       y = "Number of adopted rezonings") +
+  scale_y_continuous(limits = c(0, 9), breaks = seq(0, 8, 2))  +
+  labs(caption = "Data source: New York City Department of City Planning")
+
+ggsave(path(figs, "4_count_rezonings_nta.pdf"))
+ggsave(path(figs, "4_count_rezonings_nta.png"))
+```
+
+Map rezonings by neighborhood: number
+```{r}
+# create color palette, can get colors later
+pal <- paletteer_d("rcartocolor::Earth", 7)
+
+
+rz_nta_graph_df2 <- rz_nta_graph_df %>% 
+  arrange(-n_rz) %>% 
+  left_join(nhood, ., by = "NTAName") %>% 
+  filter(!(is.na(n_rz) | n_rz == 0))
+
+  ggplot() +
+  geom_sf(data = nhood, fill = "lightgray", color = NA,
+          alpha = 0.3) +
+  geom_sf(data = rz_nta_graph_df2, aes(fill = n_rz), color = NA) +
+  geom_sf(data = nhood, alpha = 0.3, fill = NA, 
+          color = "darkgray", size = 0.1) +
+  scale_fill_gradient(name = "Number of rezonings",
+                      low = "#F0F8FF", high = pal[7]) +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank())  +
+  labs(caption = "Data source: New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true")
+
+ggsave(path(figs, "5_num_rz_2010_2020.pdf"))
+ggsave(path(figs, "5_num_rz_2010_2020.png"))
+```
+
+Comparison of adopted vs. certified
+```{r}
+ggplot() +
+  geom_sf(data = boro, fill = "lightgray", color = NA, alpha = 0.5) +
+  geom_sf(data = nhood, color = "darkgray", alpha = 0.7, fill = NA, size = 0.1) +
+  geom_sf(
+    data = rz, aes(fill = STATUS),
+    color = NA
+  ) +
+  theme_classic() +
+  theme(
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank()
+  ) +
+  scale_fill_manual(values = c(paletteer_d("rcartocolor::Earth", 6)[[6]], paletteer_d("rcartocolor::Earth", 2)[[2]])) +
+  labs(caption = "Data source: New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true")
+```
+
+## Unit count, building code, and land use comparisons
+Recode building class values
+
+* Building class codes come from: [link](https://www1.nyc.gov/assets/finance/jump/hlpbldgcode.html)
+
+* Land use codes come from: [link](https://www1.nyc.gov/assets/planning/download/pdf/data-maps/open-data/pluto_datadictionary.pdf?v=21v3)
+
+```{r, compare changes}
+# load html codebook of building class codes
+url <- "https://www1.nyc.gov/assets/finance/jump/hlpbldgcode.html"
+othcodes <- tibble(
+  `Building Code` = c("Q0", "RC", "RX", "RD", "RM", "RI", "RZ", "QG"),
+  Description = c(
+    "Park", "Mixture of commercial types",
+    "Mixture of commerical, residential, and industrial",
+    "Mixture residential", "Mixture commercial and residential",
+    "Mixture commercial and industrial",
+    "Mixture residential and industrial",
+    "Community garden"
+  )
+)
+
+bldgcodes <- htmltab::htmltab(doc = url) %>%
+  # some codes aren't in html
+  rbind(othcodes)
+
+## land use codes
+lu_codes <- str_pad(c(1:11), width = 2, pad = "0")
+lu_desc <- c(
+  "One or Two Family Buildings",
+  "Multi-Family Walk-Up Buildings",
+  "Multi-Family Elevator Buildings",
+  "Mixed Residential & Commerical Buildings", "Commercial & Office Buildings",
+  "Industrial & Manufacturing Buildings",
+  "Trasportation and Utility",
+  "Public Facilities & Institutions",
+  "Open Space & OUtdoor Recreation",
+  "Parking Facilities",
+  "Vacant Land"
+)
+```
+```{r}
+# update categories from codes to description
+## function stored in 99_common.R
+pluto_bldg <- pluto_join %>% 
+  recode_pluto(bldgcodes, lu_desc, lu_codes)
+
+# same process, but with rezoned lots
+pluto_bldg_rz <- pluto_rz %>% 
+  recode_pluto(bldgcodes, lu_desc, lu_codes)
+```
+
+Some quick descriptives on building class and land use change
+```{r}
+pluto_bldg %>%
+  as.data.frame() %>% 
+  group_by(bldgclass_changes) %>%
+  # produce frequency and percent
+  summarize(freq = n()) %>%
+  ungroup() %>%
+  mutate(per = round(freq * 100 / sum(freq, na.rm = T), 2)) %>%
+  arrange(-per)
+
+pluto_bldg %>%
+  as.data.frame() %>% 
+  group_by(landuse_changes) %>%
+  # produce frequency and percent
+  summarize(freq = n()) %>%
+  ungroup() %>%
+  mutate(per = round(freq * 100 / sum(freq, na.rm = T), 2)) %>%
+  arrange(-per)
+
+# only rezoned buildings
+# building class changes
+pluto_bldg_rz %>%
+  as.data.frame() %>% 
+  group_by(bldgclass_changes) %>%
+  # produce frequency and percent
+  summarize(freq = n()) %>%
+  ungroup() %>%
+  mutate(per = round(freq * 100 / sum(freq, na.rm = T), 2)) %>%
+  arrange(-per)
+
+# land use class changes
+pluto_bldg_rz %>%
+  as.data.frame() %>% 
+  group_by(landuse_changes) %>%
+  # produce frequency and percent
+  summarize(freq = n()) %>%
+  ungroup() %>%
+  mutate(per = round(freq * 100 / sum(freq, na.rm = T), 2)) %>%
+  arrange(-per)
+
+# check units in cases with dupl bbl_10 values
+pluto_bldg_rz %>% 
+  group_by(bbl_10) %>% 
+  filter(n() > 1) %>% 
+  arrange(bbl_10) %>% 
+  select(c("unitsres_10", "unitsres_20"), everything())
+```
+
+Building class changes (all lots)
+
+* Mostly small changes (1-family to 2-family and vice versa)
+
+```{r, fig.width = 10}
+pluto_bldg %>%
+  as.data.frame() %>%
+  filter(
+    bldgclass_20 != bldgclass_10,
+    !is.na(bldgclass_20),
+    !is.na(bldgclass_10)
+  ) %>%
+  group_by(bldgclass_changes) %>%
+  # produce frequency and percent
+  summarize(freq = n()) %>%
+  ungroup() %>%
+  mutate(per = round(freq * 100 / sum(freq, na.rm = T), 2)) %>%
+  filter(per > 1) %>%
+  arrange(-per) %>%
+  head(5) %>%
+  # format text
+  mutate(bldgclass_changes = 
+           str_wrap(str_to_sentence(bldgclass_changes), width = 15)) %>%
+  # produce column graph
+  ggplot(aes(reorder(bldgclass_changes, -per), per)) +
+  geom_col(fill = paletteer_d("rcartocolor::Earth", 1)) +
+  geom_text(aes(label = paste0(round(per,1),"%")), vjust = -1) +
+  scale_y_continuous(limits = c(0, 15),
+                     labels = function(x) paste0(x, "%")) +
+  theme_classic() +
+  labs(
+    y = "Percentage of all BBLs with \n different building codes between 2010 and 2020",
+    x = "",
+    caption = "Data source: New York City Department of City Planning"
+  )
+
+ggsave(path(figs, "6_bbl_bld_diff.pdf"))
+ggsave(path(figs, "6_bbl_bld_diff.png"))
+```
+
+Land use changes (all lots)
+
+* Some surprising trends, like increase in vacant land
+
+```{r, fig.width = 10}
+pluto_bldg %>%
+  as.data.frame() %>%
+  filter(
+    landuse_20 != landuse_10,
+    !is.na(landuse_20),
+    !is.na(landuse_10)
+  ) %>%
+  group_by(landuse_changes) %>%
+  # produce frequency and percent
+  summarize(freq = n()) %>%
+  ungroup() %>%
+  mutate(per = round(freq * 100 / sum(freq, na.rm = T), 2)) %>%
+  filter(per > 1) %>%
+  arrange(-per) %>%
+  head(5) %>%
+  # format text
+  mutate(landuse_changes = str_wrap(str_to_sentence(landuse_changes), width = 15)) %>%
+  # produce column graph
+  ggplot(aes(reorder(landuse_changes, -per), per)) +
+  geom_col(fill = paletteer_d("rcartocolor::Earth", 1)) +
+  geom_text(aes(label = paste0(round(per,1),"%")), vjust = -1) +
+  theme_classic() +
+  scale_y_continuous(limits = c(0, 15),
+                     labels = function(x) paste0(x, "%")) +
+  labs(
+    y = "Percentage of all BBLs with \n different land use between 2010 and 2020",
+    x = "",
+    caption = "New York City Department of City Planning"
+  )
+
+ggsave(path(figs, "6b_bbl_lu_diff.pdf"))
+ggsave(path(figs, "6b_bbl_lu_diff.png"))
+```
+
+Comparison of units (all lots)
+
+* Units increased in most boroughs between 2010 and 2020
+
+```{r}
+# graph of average difference in units, and avg # of units in 2010 and 2020
+pluto_bldg %>% 
+  as.data.frame() %>% 
+  mutate(units_diff = unitsres_20 - unitsres_10) %>% 
+  group_by(borough_20) %>% 
+  summarize(across(c("units_diff", "unitsres_20", "unitsres_10"), mean, na.rm = T)) %>% 
+  pivot_longer(-"borough_20") %>% 
+  mutate(type = case_when(name == "units_diff" ~ "Difference in units",
+                          name == "unitsres_20" ~ "Units in 2020",
+                          name == "unitsres_10" ~ "Units in 2010")) %>% 
+  ggplot(aes(borough_20, value)) +
+  geom_col(aes(fill = type), width = 0.8, position = position_dodge(0.9)) +
+  geom_text(aes(label = ifelse(round(value, 1) > 0, round(value, 1), NA_real_), group = type), position = position_dodge(0.9), vjust = -1, size = 3) + 
+  scale_y_continuous(limits = c(0, 20)) +
+  scale_fill_paletteer_d("rcartocolor::Earth", 1,
+                         name = "") +
+  theme_classic() +
+  labs(x = "Borough",
+       y = "Average number of units",
+       title = "Buildings that experienced a change in building class between 2020 and 2010",
+       source = "New Y ork City Department of City Planning")
+
+ggsave(path(figs, "7_unit_change.pdf"))
+ggsave(path(figs, "7_unit_change.png"))
+```
+
+Building class changes (rezoned lots)
+
+* Mostly small changes (1-family to 2-family and vice versa)
+
+```{r, fig.width = 10}
+pluto_bldg_rz %>%
+  as.data.frame() %>% 
+  filter(bldgclass_20 != bldgclass_10,
+         !is.na(bldgclass_20),
+         !is.na(bldgclass_10)) %>% 
+  group_by(bldgclass_changes) %>%
+  # produce frequency and percent
+  summarize(freq = n()) %>%
+  ungroup() %>%
+  mutate(per = round(freq * 100 / sum(freq, na.rm = T), 2)) %>%
+  filter(per > 1) %>%
+  arrange(-per) %>%
+  head(5) %>% 
+  # format text
+  mutate(bldgclass_changes = str_wrap(str_to_sentence(bldgclass_changes), width = 15)) %>%
+  # produce column graph
+  ggplot(aes(reorder(bldgclass_changes, -per), per)) +
+  geom_col(fill = paletteer_d("rcartocolor::Earth", 1)) +
+  geom_text(aes(label = paste0(round(per,1),"%")), vjust = -1) +
+  scale_y_continuous(limits = c(0, 15),
+                     labels = function(x) paste0(x, "%")) +
+  theme_classic() +
+  labs(
+    y = "Percentage of all BBLs with \n different building codes between 2010 and 2020 - rezoned areas",
+    x = "",
+    caption = "Data source: New York City Department of City Planning"
+  )
+
+ggsave(path(figs, "8_bbl_bld_diff_rz.pdf"))
+ggsave(path(figs, "8_bbl_bld_diff_rz.png"))
+```
+
+Land use changes (only rezoned lots)
+```{r, fig.width = 10}
+pluto_bldg_rz %>%
+  as.data.frame() %>% 
+  filter(landuse_20 != landuse_10,
+         !is.na(landuse_20),
+         !is.na(landuse_10)) %>% 
+  group_by(landuse_changes) %>%
+  # produce frequency and percent
+  summarize(freq = n()) %>%
+  ungroup() %>%
+  mutate(per = round(freq * 100 / sum(freq, na.rm = T), 2)) %>%
+  filter(per > 1) %>%
+  arrange(-per) %>%
+  head(5) %>% 
+  # format text
+  mutate(landuse_changes = str_wrap(str_to_sentence(landuse_changes), width = 15)) %>%
+  # produce column graph
+  ggplot(aes(reorder(landuse_changes, -per), per)) +
+  geom_col(fill = paletteer_d("rcartocolor::Earth", 1)) +
+  geom_text(aes(label = paste0(round(per,1),"%")), vjust = -1) +
+  scale_y_continuous(limits =c(0, 15),
+                     labels = function(x) paste0(x, "%")) +
+  theme_classic() +
+  labs(
+    y = "Percentage of all BBLs with \n different land use between 2010 and 2020 - rezoned areas",
+    x = "",
+    caption = "Data source: New York City Department of City Planning"
+  )
+
+ggsave(path(figs, "8b_bbl_lu_diff_rz.pdf"))
+ggsave(path(figs, "8b_bbl_lu_diff_rz.png"))
+```
+
+Unit change comparison (only rezoned lots)
+```{r}
+# graph of average difference in units, and avg # of units in 2010 and 2020
+pluto_bldg_rz %>% 
+  as.data.frame() %>% 
+  mutate(units_diff = unitsres_20 - unitsres_10) %>% 
+  group_by(borough_20) %>% 
+  summarize(across(c("units_diff", "unitsres_20", "unitsres_10"), mean, na.rm = T)) %>% 
+  pivot_longer(-"borough_20") %>% 
+  mutate(type = case_when(name == "units_diff" ~ "Difference in units",
+                          name == "unitsres_20" ~ "Units in 2020",
+                          name == "unitsres_10" ~ "Units in 2010")) %>% 
+  ggplot(aes(borough_20, value)) +
+  geom_col(aes(fill = type), width = 0.8, position = position_dodge(0.9)) +
+  geom_text(aes(label = ifelse(round(value, 1) > 0, round(value, 1), NA_real_), group = type), position = position_dodge(0.9), vjust = -1, size = 3) + 
+  scale_y_continuous(limits = c(0, 20)) +
+  scale_fill_paletteer_d("rcartocolor::Earth", 1,
+                         name = "") +
+  theme_classic() +
+  labs(x = "Borough",
+       y = "Average number of units",
+       title = "Buildings that experienced a change in building class between 2020 and 2010 - rezoned areas",
+       caption = "Data source: New York City Department of City Planning")
+
+ggsave(path(figs, "9_unit_change_rz.pdf"))
+ggsave(path(figs, "9_unit_change_rz.png"))
+```
+
+## Same building class analysis, coarser categories
+
+* Only using lots in rezoned areas
+
+* These are categories I came up with, but basically return the same results as the land use categories
+
+```{r, message = T, warning = T}
+varlist_recode <- readxl::read_excel(path(inp, "bldcodes_recode.xlsx")) %>% 
+  separate(Character, c(str_c("char", 1:4)), sep = ",") %>% 
+  separate(Codes, c(str_c("code", 1:10)), sep = ",") %>% 
+  pivot_longer(starts_with("char"), values_to = "bldgclass_20_char") %>% 
+  select(-"name") %>% 
+  pivot_longer(starts_with("code"), values_to = "bldgclass_20") %>% 
+  select(-"name") %>% 
+  mutate(across(c("bldgclass_20_char",
+                  "bldgclass_20"), ~str_trim(., "both")))
+varlist_recode
+
+varlist_char <- unique(select(varlist_recode, c("Aggregated category", 
+                                            "bldgclass_20_char"))) %>% 
+  filter(!is.na(bldgclass_20_char))
+
+varlist_code <- unique(select(varlist_recode, c("Aggregated category",
+                                                "bldgclass_20"))) %>% 
+  filter(!is.na(bldgclass_20))
+
+stopifnot(eeptools::isid(varlist_char, "bldgclass_20_char"))
+stopifnot(eeptools::isid(varlist_code, "bldgclass_20"))
+```
+
+Producing file with generalized building class categories
+
+* Uses the pluto-rezoning joined file
+
+```{r}
+pluto_use_change <- pluto_rz %>% 
+  as.data.frame() %>%
+  mutate(bldgclass_20_char = str_extract(bldgclass_20, "[:alpha:]"),
+         bldgclass_10_char = str_extract(bldgclass_10, "[:alpha:]")) %>%
+  select(c("geometry", "bbl_20", "bbl_10", "bldgclass_20_char", "bldgclass_20",
+           "bldgclass_10_char", "bldgclass_10", "borough_20")) %>% 
+  left_join(varlist_char, by = "bldgclass_20_char") %>% 
+  left_join(varlist_code, by = "bldgclass_20", suffix = c("_char", "_code"))  %>% 
+  mutate(`Aggregated category 20` = case_when(!is.na(`Aggregated category_code`) ~ `Aggregated category_code`,
+                                           TRUE ~ `Aggregated category_char`)) %>% 
+  select(-c("Aggregated category_char", "Aggregated category_code")) %>% 
+  left_join(rename(varlist_char, bldgclass_10_char = bldgclass_20_char),
+            by = "bldgclass_10_char") %>% 
+  left_join(rename(varlist_code, bldgclass_10 = bldgclass_20),
+            by = "bldgclass_10", suffix = c("_char", "_code")) %>% 
+  mutate(`Aggregated category 10` = case_when(!is.na(`Aggregated category_code`) ~ `Aggregated category_code`,
+                                           TRUE ~ `Aggregated category_char`)) %>% 
+  select(-c("Aggregated category_char", "Aggregated category_code"))
+
+pluto_use_change %>% 
+  filter(!is.na(bldgclass_20), is.na(`Aggregated category 20`)) %>% 
+  nrow() %>% 
+  equals(0) %>% 
+  stopifnot()
+```
+
+## Investigate conversion of residential to vacant
+```{r, check strange obs}
+pluto_bldg_rz %>% 
+  # one - to - two family to vacant
+  filter(landuse_20_orig == "11" & landuse_10_orig == "01")
+
+pluto_bldg_rz %>% 
+  # one - to - two family to vacant
+  filter(landuse_20_orig == "11" & landuse_10_orig == "01") %>% 
+  mutate(diff_bbl = if_else(bbl_20 != bbl_10, 1, 0)) %>% 
+  pull(diff_bbl) %>% 
+  mean(na.rm = T) %>% 
+  `*`(100) %>%
+  round() %>% 
+  str_c("% of records have different bbl_20 and bbl_10 values")
+```
+
+## Counts of land use changes (not percentages)
+```{r, fig.width = 10}
+pluto_bldg_rz %>%
+  filter(landuse_20 != landuse_10) %>%
+  mutate(change_cat = str_c(landuse_10, " to ", landuse_20)) %>%
+  group_by(change_cat) %>%
+  summarize(freq = n()) %>%
+  arrange(-freq) %>% 
+  head(10) %>% 
+  mutate(change_cat = str_wrap(str_to_sentence(change_cat), width = 15)) %>% 
+  ggplot(aes(reorder(change_cat, -freq), freq)) +
+  geom_col(fill = paletteer_d("rcartocolor::Earth", 2)[[2]]) +
+  geom_text(aes(label = freq), vjust = -1) +
+  scale_y_continuous(limits = c(0, 700)) +
+  theme_classic() +
+  labs(
+    y = "Frequency of all BBLs with \n different land use between 2010 and 2020",
+    x = "",
+    caption = "Data source: New York City Department of City Planning"
+  )
+```
+
+Look at changes in land use by borough (table)
+
+```{r}
+use_change_boro <- pluto_bldg_rz %>%
+  filter(landuse_20 != landuse_10) %>%
+  mutate(change_cat = str_c(landuse_10, " to ", landuse_20)) %>%
+  group_by(change_cat, borough_20) %>%
+  summarize(freq = n()) %>%
+  mutate(change_cat = str_wrap(str_to_sentence(change_cat), width = 15)) %>%
+  group_by(change_cat) %>% 
+  mutate(cat_total = sum(freq))
+use_change_boro %>% 
+  arrange(-cat_total) %>% 
+  gt()
+```
+
+Graph of changes in land use by borough
+
+* Ultimately did not include in Medium blog post, but could be added in future research
+
+```{r, fig.width = 12}
+use_change_boro %>% 
+  filter(cat_total >= 106) %>% 
+  ggplot(aes(reorder(change_cat, -cat_total), freq)) +
+  geom_col(aes(fill = borough_20), color = "gray", size = 0.3) +
+  stat_summary(
+    aes(label = stat(y)), fun = 'sum', geom = 'text', vjust = -1,
+  ) +
+  scale_fill_paletteer_d(name = "", "rcartocolor::Earth") +
+  scale_y_continuous((limits = c(0, 700))) +
+  theme_classic() +
+  labs(
+    y = "Percentage of all BBLs with \n different land use between 2010 and 2020",
+    x = "",
+    caption = "Data source: New York City Department of City Planning"
+  )
+```
+
+## Mapping general trends in land use changes
+Produce indicators for change in land use
+
+* Growth in residential
+
+* Loss of residential
+
+* Growth of vacant land
+
+* Loss of public/outdoor space
+
+```{r}
+change_indicators <- pluto_bldg_rz %>% 
+  mutate(growth_res = case_when((landuse_20_orig %in% c("01", "02", "03", "04") 
+                                 & !(landuse_10_orig %in% c("01", "02", "03", "04"))) ~ 1,
+                                 TRUE ~ 0),
+         loss_res = case_when((landuse_10_orig %in% c("01", "02", "03", "04") 
+                                 & !(landuse_20_orig %in% c("01", "02", "03", "04"))) ~ 1,
+                                 TRUE ~ 0),
+         loss_public = case_when((landuse_10_orig %in% c("08", "09")) &
+                                   !(landuse_20_orig %in% c("08", "09")) ~ 1,
+                                  TRUE ~ 0),
+         growth_vacant = case_when((landuse_20_orig %in% c("11")) &
+                                   !(landuse_10_orig %in% c("11")) ~ 1,
+                                  TRUE ~ 0))
+                        
+                                
+```
+
+Plot percentages of above indicators by neighborhood
+```{r}
+use_change_nhood <- change_indicators %>% 
+  st_as_sf() %>% 
+  st_join(nhood, join = st_intersects) %>% 
+  as.data.frame() %>% 
+  verify_isid("bbl_20") %>% 
+  group_by(NTAName) %>% 
+  summarize(across(c("growth_res",
+                     "loss_res",
+                     "loss_public",
+                     "growth_vacant"), mean, na.rm = T)) %>% 
+  pivot_longer(c("growth_res",
+                     "loss_res",
+                     "loss_public",
+                     "growth_vacant"), names_to = "indicator",
+               values_to = "mean") %>% 
+  left_join(nhood, ., by = "NTAName") %>% 
+  # exclude mean = 0 (will show up as gray on graph)
+  filter(mean > 0)
+```
+
+```{r, mapping change, fig.height = 20, fig.width = 10}
+use_change_nhood %>% 
+  filter(str_starts(indicator, "growth")) %>% 
+  ggplot() +
+  geom_sf(data = nhood, fill = "lightgray", color = NA,
+          alpha = 0.3) +
+  geom_sf(aes(fill = mean), color = NA) +
+  geom_sf(data = nhood, alpha = 0.3, fill = NA, 
+          color = "darkgray", size = 0.1) +
+  scale_fill_gradient(name = "Number of building class",
+                      low = "#F0F8FF", high = pal[7]) +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank()) +
+  facet_grid(vars(indicator)) +
+  labs(caption = "Data source: New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true")
+
+ggsave(path(figs, "growth_maps.pdf"), height = 20)
+
+use_change_nhood %>% 
+  filter(str_starts(indicator, "loss")) %>% 
+  ggplot() +
+  geom_sf(data = nhood, fill = "lightgray", color = NA,
+          alpha = 0.3) +
+  geom_sf(aes(fill = mean), color = NA) +
+  geom_sf(data = nhood, alpha = 0.3, fill = NA, 
+          color = "darkgray", size = 0.1) +
+  scale_fill_gradient(name = "Number of building class",
+                      low = "#faf5e9", high = pal[1]) +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank()) +
+  facet_grid(vars(indicator)) +
+  labs(caption = "Data source: New York City Department of City Planning") +
+  annotation_scale(unit_category = "imperial") +
+  annotation_north_arrow(location = "br", which_north = "true")
+
+ggsave(path(figs, "loss_maps.pdf"), height = 20)
+```

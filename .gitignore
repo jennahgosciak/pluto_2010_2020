@@ -1,3 +1,6 @@
+# Zip files
+*.zip
+
 # History files
 .Rhistory
 .Rapp.history
@@ -37,3 +40,24 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+
+# Data files
+*.csv
+*/*.csv
+*.xlsx
+*.xls
+*.shp
+
+# Other R files
+renv.lock
+*.dcf
+.RDataTmp
+
+# Output files
+*.html
+*.png
+*.pdf
+*.psb
+*.webp
+*.RDS
+*.RDataTmp1
